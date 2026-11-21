@@ -11,7 +11,7 @@ Trình soạn thảo văn bản GUI **nhẹ** cho Linux, mở bằng `ted <tên 
 ## Cài đặt
 
 ```bash
-sudo apt install python3-tk zenity   # zenity là tùy chọn: hộp thoại mở/lưu file kiểu GTK
+sudo apt install git python3-tk zenity   # zenity là tùy chọn: hộp thoại mở/lưu file kiểu GTK
 git clone https://github.com/Ne0nGiT/ted.git
 cd ted
 sudo install -m 755 ted /usr/local/bin/ted
