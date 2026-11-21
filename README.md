@@ -11,7 +11,7 @@ A **lightweight** GUI text editor for Linux, opened with `ted <filename>`, with 
 ## Installation
 
 ```bash
-sudo apt install python3-tk zenity   # zenity is optional: GTK-style file open/save dialogs
+sudo apt install git python3-tk zenity   # zenity is optional: GTK-style file open/save dialogs
 git clone https://github.com/Herox234/ted.git
 cd ted
 sudo install -m 755 ted /usr/local/bin/ted
