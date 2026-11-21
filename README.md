@@ -15,6 +15,7 @@ sudo apt install git python3-tk zenity   # zenity is optional: GTK-style file op
 git clone https://github.com/Ne0nGiT/ted.git
 cd ted
 sudo install -m 755 ted /usr/local/bin/ted
+cd ..
 ```
 
 Try it without installing: `python3 ted notes.txt`
