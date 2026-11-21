@@ -1,61 +1,60 @@
 # ted
 
-Trình soạn thảo văn bản GUI **nhẹ** cho Linux, mở bằng `ted <tên file>`, dùng phím tắt hiện đại (Ctrl+S, Ctrl+Z, Ctrl+F...) thay cho kiểu nano.
+A **lightweight** GUI text editor for Linux, opened with `ted <filename>`, with modern shortcuts (Ctrl+S, Ctrl+Z, Ctrl+F...) instead of a nano-style interface.
 
 *A tiny GUI text editor for Linux with modern keybindings. One Python file, tkinter only.*
 
-- Một file Python duy nhất, chỉ cần `python3` và `tkinter`
-- Khởi động nhanh, ít tốn RAM, mở file lớn vẫn mượt
-- Gõ tiếng Việt có dấu bình thường, lưu UTF-8
+- A single Python file; requires only `python3` and `tkinter`
+- Starts quickly, uses little RAM, and stays smooth even with large files
+- Handles Vietnamese typing with diacritics normally and saves as UTF-8
 
-## Cài đặt
+## Installation
 
 ```bash
-sudo apt install python3-tk zenity   # zenity là tùy chọn: hộp thoại mở/lưu file kiểu GTK
+sudo apt install python3-tk zenity   # zenity is optional: GTK-style file open/save dialogs
 git clone https://github.com/Herox234/ted.git
 cd ted
 sudo install -m 755 ted /usr/local/bin/ted
 ```
 
-Chạy thử mà không cần cài: `python3 ted ghichu.txt`
+Try it without installing: `python3 ted notes.txt`
 
-Dùng: `ted <tên file>`. File chưa có thì mở trống và được tạo khi lưu (Ctrl+S).
+Usage: `ted <filename>`. If the file doesn't exist, it opens as a blank document and is created when you save (Ctrl+S).
 
-## Phím tắt
+## Keyboard shortcuts
 
-| Phím | Chức năng |
+| Key | Action |
 |---|---|
-| Ctrl+S / Ctrl+Shift+S | Lưu / Lưu thành |
-| Ctrl+O | Mở file |
-| Ctrl+Q hoặc Ctrl+W | Thoát (hỏi nếu chưa lưu) |
-| Ctrl+Z / Ctrl+Y (hoặc Ctrl+Shift+Z) | Undo / Redo |
-| Ctrl+A | Chọn tất cả |
-| Ctrl+F | Tìm (Enter xuống, Shift+Enter lên, Esc đóng) |
-| Ctrl+H | Tìm và thay thế |
-| F3 / Shift+F3 | Kết quả tìm tiếp / trước |
-| Ctrl+G | Đến dòng |
-| Ctrl+D | Nhân đôi dòng |
-| Ctrl+Backspace / Ctrl+Delete | Xóa nguyên từ bên trái / phải |
-| Ctrl+/ | Bật tắt comment (dòng hoặc khối đang chọn) |
-| Tab / Shift+Tab | Thụt / lùi lề (cả khối nếu chọn nhiều dòng) |
-| Alt+Z | Bật tắt xuống dòng tự động |
-| Ctrl+= / Ctrl+- / Ctrl+0 hoặc Ctrl+cuộn chuột | Phóng to / thu nhỏ / mặc định |
+| Ctrl+S / Ctrl+Shift+S | Save / Save As |
+| Ctrl+O | Open file |
+| Ctrl+Q or Ctrl+W | Quit (asks if there are unsaved changes) |
+| Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) | Undo / Redo |
+| Ctrl+A | Select all |
+| Ctrl+F | Find (Enter for next, Shift+Enter for previous, Esc to close) |
+| Ctrl+H | Find and replace |
+| F3 / Shift+F3 | Find next / previous |
+| Ctrl+G | Go to line |
+| Ctrl+D | Duplicate line |
+| Ctrl+Backspace / Ctrl+Delete | Delete the word to the left / right |
+| Ctrl+/ | Toggle comment (on the current line or selected block) |
+| Tab / Shift+Tab | Indent / outdent (the whole block when multiple lines are selected) |
+| Alt+Z | Toggle word wrap |
+| Ctrl+= / Ctrl+- / Ctrl+0 or Ctrl+mouse wheel | Zoom in / out / reset |
 
-## Tính năng
+## Features
 
-- **Tô màu cú pháp:** Python, JavaScript/TypeScript, JSON, HTML/XML, CSS, Markdown, Shell, họ C (C/C++/Java/Go/Rust/C#/PHP...), file config (yaml/toml/ini). Nhận theo đuôi file hoặc dòng `#!`.
-- **File code:** tự đóng ngoặc và nháy, bọc phần đang chọn, Enter giữa `{}` mở thành 3 dòng, thụt lề tự động.
-- Luôn có ký tự xuống dòng ở cuối file khi lưu (như nano), nên `cat` và `git diff` không báo thiếu newline.
-- Nhớ vị trí con trỏ của lần mở trước (lưu ở `~/.cache/ted/positions.json`).
-- Theme tối.
+- **Syntax highlighting:** Python, JavaScript/TypeScript, JSON, HTML/XML, CSS, Markdown, Shell, C-family languages (C/C++/Java/Go/Rust/C#/PHP...), and config files (yaml/toml/ini). Detected by file extension or `#!` line.
+- **For code files:** automatically closes brackets and quotes, wraps selected text, expands Enter inside `{}` into three lines, and auto-indents.
+- Always adds a trailing newline when saving (like nano), so `cat` and `git diff` won't report a missing newline.
+- Remembers the cursor position from the previous session (stored in `~/.cache/ted/positions.json`).
+- Dark theme.
 
-## Hạn chế
+## Limitations
 
-- Chỉ mới thử trên Linux Mint. Chưa thử trên Windows hoặc macOS.
-- Chỉ mở một file mỗi cửa sổ, không có tab, không có số dòng.
-- Tô màu cú pháp dùng regex nên đơn giản hơn các editor lớn. Với file trên 4000 dòng, chuỗi hoặc comment nhiều dòng bắt đầu ngoài vùng đang xem có thể tô chưa chính xác.
-- Chưa tự đoán encoding ngoài UTF-8 (có fallback latin-1 khi đọc file).
+- Only one file per window; no tabs or line numbers.
+- Syntax highlighting uses regular expressions, so it is simpler than that of larger editors. In files over 4,000 lines, strings or multiline comments that begin outside the visible area may not be highlighted accurately.
+- Does not automatically detect encodings other than UTF-8 (falls back to latin-1 when reading a file).
 
-## Giấy phép
+## License
 
-MIT, xem file [LICENSE](LICENSE).
+MIT; see [LICENSE](LICENSE).
