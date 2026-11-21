@@ -1,0 +1,1006 @@
+#!/usr/bin/env python3
+"""ted - text editor GUI nhẹ, keybind hiện đại.  Dùng: ted <tên file>"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tkinter as tk
+import tkinter.font as tkfont
+from bisect import bisect_right
+from tkinter import filedialog, ttk
+
+VERSION = "1.1.0"
+
+BG, FG, SEL = "#1e1e1e", "#d4d4d4", "#264f78"
+BAR_BG, BAR_FG = "#252526", "#9d9d9d"
+FIELD_BG, BTN_BG, BTN_HOVER = "#3c3c3c", "#3c3c3c", "#505050"
+ACCENT = "#0e639c"
+MATCH_BG = "#614d00"
+
+
+# ------------------------------------------------------------ syntax highlight
+# >>> HIGHLIGHT-BEGIN
+SYN_COLORS = {
+    "comment": "#6a9955", "string": "#ce9178", "number": "#b5cea8",
+    "keyword": "#569cd6", "builtin": "#4ec9b0", "const": "#4fc1ff",
+    "defname": "#dcdcaa", "decorator": "#c586c0", "attr": "#9cdcfe",
+}
+PAD_LINES = 120          # tô thêm quanh vùng đang nhìn thấy
+FULL_SCAN_LINES = 4000   # file ngắn hơn: quét cả file để đúng chuỗi/comment nhiều dòng
+NAV_KEYS = {"Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next", "Escape",
+            "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Caps_Lock"}
+
+_DQ = r'"(?:\\.|[^"\\\n])*"'
+_SQ = r"'(?:\\.|[^'\\\n])*'"
+_NUM = r"\b(?:0[xX][0-9a-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b"
+_HASH_CMT = r"(?:^|(?<=\s))#[^\n]*"
+
+
+def _kw(words):
+    return r"\b(?:" + "|".join(words.split()) + r")\b"
+
+
+_PY = [
+    ("comment", r"#[^\n]*"),
+    ("string", r'(?<!\w)[rRbBuUfF]{0,2}(?:"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|' + _DQ + "|" + _SQ + ")"),
+    ("decorator", r"^[ \t]*@[\w.]+"),
+    ("defname", r"(?<=\bdef )\w+|(?<=\bclass )\w+"),
+    ("number", _NUM),
+    ("keyword", _kw("and as assert async await break class continue def del elif else except finally for from "
+                    "global if import in is lambda nonlocal not or pass raise return try while with yield match case")),
+    ("const", _kw("True False None")),
+    ("builtin", _kw("self cls print len range int str float list dict set tuple bool open isinstance super "
+                    "enumerate zip map filter sorted min max sum abs input type")),
+]
+_JS = [
+    ("comment", r"//[^\n]*|/\*[\s\S]*?\*/"),
+    ("string", _DQ + "|" + _SQ + r"|`(?:\\[\s\S]|[^`\\])*`"),
+    ("number", _NUM),
+    ("defname", r"(?<=\bfunction )\w+|(?<=\bclass )\w+"),
+    ("keyword", _kw("break case catch class const continue debugger default delete do else export extends finally "
+                    "for function if import in instanceof let new of return static super switch throw try typeof "
+                    "var void while with yield async await from as interface type enum implements public private "
+                    "protected readonly")),
+    ("const", _kw("true false null undefined NaN this")),
+]
+_JSON = [
+    ("attr", _DQ + r"(?=\s*:)"),
+    ("string", _DQ),
+    ("number", r"-?\b\d[\d.eE+-]*\b"),
+    ("const", _kw("true false null")),
+]
+_HTML = [
+    ("comment", r"<!--[\s\S]*?-->"),
+    ("keyword", r"</?[A-Za-z][\w:.-]*|<![A-Za-z]+|/?>"),
+    ("string", r'(?<==)"[^"\n]*"|(?<==)\'[^\'\n]*\''),
+    ("attr", r"[\w:@.-]+(?==)"),
+]
+_CSS = [
+    ("comment", r"/\*[\s\S]*?\*/"),
+    ("string", _DQ + "|" + _SQ),
+    ("keyword", r"@[\w-]+"),
+    ("number", r"#[0-9a-fA-F]{3,8}\b|-?\b\d*\.?\d+(?:px|em|rem|%|vh|vw|ms|s|deg|fr)?"),
+    ("defname", r"[.#][A-Za-z_][\w-]*"),
+    ("attr", r"[\w-]+(?=\s*:)"),
+]
+_MD = [
+    ("string", r"```[\s\S]*?```|`[^`\n]+`"),
+    ("keyword", r"^#{1,6}[ \t][^\n]*"),
+    ("defname", r"\*\*[^*\n]+\*\*|__[^_\n]+__"),
+    ("number", r"\[[^\]\n]*\]\([^)\n]*\)"),
+    ("builtin", r"^[ \t]*(?:[-*+]|\d+\.)(?=[ \t])"),
+    ("comment", r"^>[^\n]*"),
+]
+_SH = [
+    ("string", _DQ + "|" + r"'[^'\n]*'"),
+    ("attr", r"\$\{[^}\n]*\}|\$[A-Za-z_]\w*|\$[0-9@#?*!$]"),
+    ("comment", _HASH_CMT),
+    ("number", _NUM),
+    ("keyword", _kw("if then else elif fi for while until do done case esac function in select return exit break "
+                    "continue local export readonly shift source alias unset")),
+    ("builtin", _kw("echo cd ls cat grep sed awk printf test read set eval exec trap sudo mkdir rm cp mv chmod chown")),
+]
+_C = [
+    ("comment", r"//[^\n]*|/\*[\s\S]*?\*/"),
+    ("string", _DQ + "|" + _SQ),
+    ("decorator", r"^[ \t]*#[ \t]*\w+"),
+    ("number", _NUM),
+    ("keyword", _kw("if else for while do switch case default break continue return goto struct union enum typedef "
+                    "static const extern inline volatile register class public private protected namespace using "
+                    "template typename new delete try catch throw sizeof func package import var go defer chan "
+                    "range interface map fn let mut impl trait pub use mod match loop where async await")),
+    ("const", _kw("true false null NULL nullptr this self")),
+    ("builtin", _kw("int char float double void long short unsigned signed bool byte string size_t i8 i16 i32 i64 "
+                    "u8 u16 u32 u64 usize f32 f64 str String Vec")),
+]
+_CONF = [
+    ("string", _DQ + "|" + _SQ),
+    ("comment", _HASH_CMT + r"|^;[^\n]*"),
+    ("keyword", r"^\[[^\]\n]+\]"),
+    ("attr", r"^[ \t-]*[\w.\-]+(?=[ \t]*[:=])"),
+    ("number", _NUM),
+    ("const", _kw("true false null yes no on off True False")),
+]
+
+LANG_PARTS = {"python": _PY, "js": _JS, "json": _JSON, "html": _HTML, "css": _CSS,
+              "md": _MD, "shell": _SH, "c": _C, "conf": _CONF}
+LANG_LABEL = {"python": "Python", "js": "JavaScript", "json": "JSON", "html": "HTML/XML", "css": "CSS",
+              "md": "Markdown", "shell": "Shell", "c": "C-like", "conf": "Config"}
+EXT_LANG = {}
+for _lang, _exts in {
+    "python": "py pyw", "js": "js mjs cjs jsx ts tsx", "json": "json jsonc", "html": "html htm xml svg vue",
+    "css": "css", "md": "md markdown", "shell": "sh bash zsh",
+    "c": "c h cpp cc hpp cs java go rs php kt swift dart",
+    "conf": "yml yaml toml ini conf cfg env",
+}.items():
+    for _e in _exts.split():
+        EXT_LANG[_e] = _lang
+_RX_CACHE = {}
+
+
+def get_lang_rx(name):
+    if name not in _RX_CACHE:
+        parts = LANG_PARTS[name]
+        _RX_CACHE[name] = re.compile("|".join(f"(?P<{t}>{p})" for t, p in parts), re.M)
+    return _RX_CACHE[name]
+
+
+def detect_lang(path, first_line=""):
+    if path and "." in os.path.basename(path):
+        lang = EXT_LANG.get(path.rsplit(".", 1)[-1].lower())
+        if lang:
+            return lang
+    if first_line.startswith("#!"):
+        for key, lang in (("python", "python"), ("node", "js"), ("bash", "shell"), ("sh", "shell")):
+            if key in first_line:
+                return lang
+    return None
+
+
+def tokenize(rx, text):
+    """Trả về (tag, start, end); mỗi vị trí chỉ khớp 1 token nên chuỗi/comment lấn át keyword."""
+    for m in rx.finditer(text):
+        s, e = m.span()
+        if e > s:
+            yield m.lastgroup, s, e
+# <<< HIGHLIGHT-END
+
+PAIRS = {"(": ")", "[": "]", "{": "}", '"': '"', "'": "'", "`": "`"}
+CLOSERS = set(")]}\"'`")
+COMMENTS = {  # ký hiệu comment theo ngôn ngữ: (mở, đóng)
+    "python": ("# ", ""), "shell": ("# ", ""), "conf": ("# ", ""),
+    "js": ("// ", ""), "c": ("// ", ""),
+    "css": ("/* ", " */"), "html": ("<!-- ", " -->"), "md": ("<!-- ", " -->"),
+}
+AFTER_OK = ")]}\"'`,;:.>"  # ký tự đứng sau con trỏ mà vẫn cho phép tự đóng cặp
+
+
+# ---------------------------------------------------------------- dialog tối
+class Dialog(tk.Toplevel):
+    """Hộp thoại tự vẽ theo theme tối. buttons = [(nhãn, giá trị)], nút đầu là mặc định."""
+
+    def __init__(self, parent, title, message, buttons, entry=None):
+        super().__init__(parent)
+        self.configure(bg=BAR_BG)
+        self.title(title)
+        self.transient(parent)
+        self.resizable(False, False)
+        self.result = None
+        self.entry = None
+
+        tk.Label(self, text=message, bg=BAR_BG, fg=FG, justify="left",
+                 wraplength=380, padx=22, pady=18).pack(anchor="w")
+        if entry is not None:
+            self.entry = tk.Entry(self, bg=FIELD_BG, fg=FG, insertbackground=FG,
+                                  relief="flat", highlightthickness=1,
+                                  highlightbackground="#555", highlightcolor=ACCENT)
+            self.entry.insert(0, entry)
+            self.entry.pack(fill="x", padx=22, pady=(0, 14), ipady=4)
+            self.entry.select_range(0, "end")
+
+        row = tk.Frame(self, bg=BAR_BG)
+        row.pack(pady=(0, 16))
+        self.btns = []
+        for i, (label, value) in enumerate(buttons):
+            b = tk.Button(row, text=label, relief="flat", bd=0, padx=16, pady=6,
+                          bg=ACCENT if i == 0 else BTN_BG, fg="#ffffff" if i == 0 else FG,
+                          activebackground=BTN_HOVER, activeforeground=FG,
+                          command=lambda v=value: self._done(v))
+            b.pack(side="left", padx=5)
+            self.btns.append(b)
+
+        self.bind("<Escape>", lambda e: self._done(None))
+        self.bind("<Return>", self._enter)
+        self.protocol("WM_DELETE_WINDOW", lambda: self._done(None))
+
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        try:
+            self.wait_visibility()
+            self.grab_set()
+        except tk.TclError:
+            pass
+        (self.entry or self.btns[0]).focus_set()
+        self.wait_window()
+
+    def _enter(self, _e):
+        w = self.focus_get()
+        if isinstance(w, tk.Button):
+            w.invoke()
+        else:
+            self.btns[0].invoke()
+
+    def _done(self, value):
+        if self.entry is not None and value is not None:
+            value = self.entry.get()
+        self.result = value
+        self.destroy()
+
+
+def ask_save(parent):
+    return Dialog(parent, "Chưa lưu", "File có thay đổi chưa lưu.\nBạn muốn làm gì?",
+                  [("Lưu", "save"), ("Không lưu", "discard"), ("Hủy", None)]).result
+
+
+def show_error(parent, message):
+    Dialog(parent, "Lỗi", message, [("OK", True)])
+
+
+def ask_text(parent, title, message, initial=""):
+    return Dialog(parent, title, message, [("OK", True), ("Hủy", None)], entry=initial).result
+
+
+# ------------------------------------------------------- chọn file (zenity/GTK)
+def pick_file(save=False, initial=None):
+    """Dùng zenity (hộp thoại GTK, có sẵn trên Mint) nếu có, không thì rơi về Tk."""
+    if shutil.which("zenity"):
+        cmd = ["zenity", "--file-selection"]
+        if save:
+            cmd += ["--save", "--confirm-overwrite"]
+        if initial:
+            cmd += ["--filename", initial]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode in (0, 1):  # 1 = người dùng bấm hủy
+                return r.stdout.strip() or None
+        except OSError:
+            pass
+    if save:
+        return filedialog.asksaveasfilename(initialfile=os.path.basename(initial or "")) or None
+    return filedialog.askopenfilename() or None
+
+
+class Editor:
+    def __init__(self, path=None):
+        self.path = os.path.abspath(path) if path else None
+        self.root = tk.Tk(className="ted")
+        self.root.geometry("900x600")
+        self._set_icon()
+        self.root.configure(bg=BG)
+        self._pending_y = None
+        self._scroll_job = None
+        self.lang_rx = None
+        self.indent_unit = "\t"
+        self.wrap_on = False
+        self.lang_key = None
+        self.lang_name = ""
+        self._hl_job = None
+        self._hl_range = (0, -1)
+
+        self.font = tkfont.nametofont("TkFixedFont").copy()
+        self.font.configure(size=12)
+        self._style_scrollbars()
+
+        # --- text + scrollbar ---
+        body = tk.Frame(self.root, bg=BG)
+        body.pack(fill="both", expand=True)
+        self.text = tk.Text(
+            body, wrap="none", undo=True, maxundo=-1, autoseparators=True,
+            font=self.font, bg=BG, fg=FG, insertbackground=FG,
+            selectbackground=SEL, selectforeground=FG, relief="flat",
+            borderwidth=0, padx=8, pady=6, highlightthickness=0,
+        )
+        self.ys = ttk.Scrollbar(body, orient="vertical", command=self._yview)
+        self.xs = ttk.Scrollbar(body, orient="horizontal", command=self.text.xview)
+        self.text.configure(yscrollcommand=self._on_yscroll, xscrollcommand=self.xs.set)
+        self.ys.pack(side="right", fill="y")
+        self.xs.pack(side="bottom", fill="x")
+        self.text.pack(side="left", fill="both", expand=True)
+        for tag, color in SYN_COLORS.items():
+            self.text.tag_configure(tag, foreground=color)
+        self.text.tag_configure("match", background=MATCH_BG)
+        self.text.tag_raise("sel")
+        self._set_tabs()
+
+        # --- find / replace bar (ẩn mặc định) ---
+        self.find_bar = tk.Frame(self.root, bg=BAR_BG)
+        self.find_var, self.repl_var = tk.StringVar(), tk.StringVar()
+        tk.Label(self.find_bar, text="Tìm", bg=BAR_BG, fg=BAR_FG).pack(side="left", padx=(8, 4))
+        self.find_entry = self._entry(self.find_bar, self.find_var)
+        self.find_entry.pack(side="left", pady=5, ipady=2)
+        self.repl_frame = tk.Frame(self.find_bar, bg=BAR_BG)
+        tk.Label(self.repl_frame, text="Thay", bg=BAR_BG, fg=BAR_FG).pack(side="left", padx=(12, 4))
+        self.repl_entry = self._entry(self.repl_frame, self.repl_var)
+        self.repl_entry.pack(side="left", ipady=2)
+        self._button(self.repl_frame, "Thay", self.replace_one).pack(side="left", padx=4)
+        self._button(self.repl_frame, "Thay hết", self.replace_all).pack(side="left")
+        self.find_info = tk.Label(self.find_bar, text="", bg=BAR_BG, fg=BAR_FG)
+        self.find_info.pack(side="right", padx=8)
+        self.find_var.trace_add("write", lambda *_: self.highlight_matches())
+
+        # --- status bar ---
+        self.status = tk.Label(self.root, anchor="w", bg=BAR_BG, fg=BAR_FG, padx=8)
+        self.status.pack(side="bottom", fill="x")
+
+        self._bind_keys()
+        self.load()
+        self.set_language()
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.text.focus_set()
+        self.refresh()
+
+    # ---------- widget helpers ----------
+    def _entry(self, parent, var):
+        return tk.Entry(parent, textvariable=var, width=24, bg=FIELD_BG, fg=FG,
+                        insertbackground=FG, relief="flat", highlightthickness=1,
+                        highlightbackground="#555", highlightcolor=ACCENT)
+
+    def _button(self, parent, text, cmd):
+        return tk.Button(parent, text=text, command=cmd, relief="flat", bd=0,
+                         padx=10, pady=2, bg=BTN_BG, fg=FG,
+                         activebackground=BTN_HOVER, activeforeground=FG)
+
+    def _style_scrollbars(self):
+        st = ttk.Style(self.root)
+        st.theme_use("clam")
+        for orient, side in (("Vertical", "ns"), ("Horizontal", "ew")):
+            name = f"{orient}.TScrollbar"
+            st.layout(name, [(f"{orient}.Scrollbar.trough", {
+                "sticky": side,
+                "children": [(f"{orient}.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})],
+            })])
+            st.configure(name, background="#424242", troughcolor=BG, bordercolor=BG,
+                         lightcolor="#424242", darkcolor="#424242", relief="flat", width=12)
+            st.map(name, background=[("active", "#686868"), ("pressed", "#808080")])
+
+    # ---------- cuộn mượt hơn: gộp các lệnh kéo thanh cuộn ----------
+    def _yview(self, *args):
+        if args and args[0] == "moveto":
+            self._pending_y = args
+            if self._scroll_job is None:
+                self._scroll_job = self.root.after(15, self._flush_scroll)
+        else:
+            self.text.yview(*args)
+
+    def _flush_scroll(self):
+        self._scroll_job = None
+        if self._pending_y:
+            self.text.yview(*self._pending_y)
+            self._pending_y = None
+
+    # ---------- file ----------
+    def load(self):
+        if self.path and os.path.isfile(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    data = f.read()
+            except UnicodeDecodeError:
+                with open(self.path, "r", encoding="latin-1") as f:
+                    data = f.read()
+            except OSError as e:
+                show_error(self.root, f"Không mở được file:\n{e}")
+                data = ""
+            self.text.insert("1.0", data)
+        self.text.edit_reset()
+        self.text.edit_modified(False)
+        self.text.mark_set("insert", "1.0")
+        self._restore_pos()
+
+    def save(self, _e=None):
+        if not self.path:
+            return self.save_as()
+        try:
+            data = self.text.get("1.0", "end-1c")
+            if data and not data.endswith("\n"):
+                data += "\n"  # như nano: luôn có newline cuối file
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(data)
+        except OSError as e:
+            show_error(self.root, f"Không lưu được:\n{e}")
+            return "break"
+        self.text.edit_modified(False)
+        self.refresh()
+        return "break"
+
+    def save_as(self, _e=None):
+        start = self.path or os.path.join(os.getcwd(), "")
+        p = pick_file(save=True, initial=start)
+        if p:
+            self.path = os.path.abspath(p)
+            self.set_language()
+            self.save()
+        return "break"
+
+    def open_file(self, _e=None):
+        if not self.confirm_discard():
+            return "break"
+        self._save_pos()
+        p = pick_file(save=False, initial=os.path.join(os.path.dirname(self.path or os.getcwd()), ""))
+        if p:
+            self.text.delete("1.0", "end")
+            self.path = os.path.abspath(p)
+            self.load()
+            self.set_language()
+            self.refresh()
+        return "break"
+
+    def confirm_discard(self):
+        if not self.text.edit_modified():
+            return True
+        ans = ask_save(self.root)
+        if ans is None:
+            return False
+        if ans == "save":
+            self.save()
+            return not self.text.edit_modified()
+        return True
+
+    def quit(self, _e=None):
+        if self.confirm_discard():
+            self._save_pos()
+            self.root.destroy()
+        return "break"
+
+    # ---------- keybinds ----------
+    def _bind(self, keys, fn):
+        for k in keys:
+            self.text.bind(k, lambda e, f=fn: (f(), "break")[1])
+
+    def _bind_keys(self):
+        b = self._bind
+        self.text.bind("<Control-s>", self.save)
+        self.text.bind("<Control-S>", self.save_as)
+        self.text.bind("<Control-o>", self.open_file)
+        self.text.bind("<Control-q>", self.quit)
+        self.text.bind("<Control-w>", self.quit)
+        for w in (self.find_entry, self.repl_entry):
+            w.bind("<Control-s>", self.save)
+            w.bind("<Control-q>", self.quit)
+        b(["<Control-z>"], self.undo)
+        b(["<Control-y>", "<Control-Z>"], self.redo)
+        b(["<Control-a>", "<Control-A>"], lambda: self.text.tag_add("sel", "1.0", "end-1c"))
+        b(["<Control-f>"], lambda: self.open_find(False))
+        b(["<Control-h>"], lambda: self.open_find(True))
+        b(["<Control-g>"], self.goto_line)
+        b(["<Control-d>"], self.duplicate_line)
+        b(["<Control-BackSpace>"], self.del_word_left)
+        b(["<Control-Delete>"], self.del_word_right)
+        b(["<Control-equal>", "<Control-plus>"], lambda: self.zoom(1))
+        b(["<Control-minus>"], lambda: self.zoom(-1))
+        b(["<Control-0>"], lambda: self.zoom(0))
+        b(["<F3>"], lambda: self.find_next(False))
+        b(["<Shift-F3>"], lambda: self.find_next(True))
+        b(["<Return>"], self.auto_indent)
+        # zoom bằng Ctrl+cuộn chuột
+        self.text.bind("<Control-Button-4>", lambda e: (self.zoom(1), "break")[1])
+        self.text.bind("<Control-Button-5>", lambda e: (self.zoom(-1), "break")[1])
+        self.text.bind("<Control-MouseWheel>", lambda e: (self.zoom(1 if e.delta > 0 else -1), "break")[1])
+        # find bar
+        self.find_entry.bind("<Return>", lambda e: (self.find_next(False), "break")[1])
+        self.find_entry.bind("<Shift-Return>", lambda e: (self.find_next(True), "break")[1])
+        for w in (self.find_entry, self.repl_entry):
+            w.bind("<Escape>", lambda e: (self.close_find(), "break")[1])
+        self.text.bind("<KeyPress>", self._on_keypress)
+        self.text.bind("<Tab>", self._on_tab)
+        self.text.bind("<Shift-Tab>", self._on_shift_tab)
+        try:
+            self.text.bind("<ISO_Left_Tab>", self._on_shift_tab)  # Shift+Tab trên X11
+        except tk.TclError:
+            pass
+        b(["<Control-slash>"], self.toggle_comment)
+        b(["<Alt-z>", "<Alt-Z>"], self.toggle_wrap)
+        self.text.bind("<BackSpace>", self._on_backspace)
+        self.text.bind("<KeyRelease>", self._on_key_release, add="+")
+        self.text.bind("<ButtonRelease-2>", lambda e: self.schedule_highlight(), add="+")
+        self.text.bind("<Configure>", lambda e: self._maybe_rehighlight(), add="+")
+        # cập nhật status
+        for ev in ("<KeyRelease>", "<ButtonRelease-1>", "<<Modified>>"):
+            self.text.bind(ev, lambda e: self.root.after_idle(self.refresh), add="+")
+
+    # ---------- edit ----------
+    def undo(self):
+        try:
+            self.text.edit_undo()
+        except tk.TclError:
+            pass
+
+    def redo(self):
+        try:
+            self.text.edit_redo()
+        except tk.TclError:
+            pass
+
+    def auto_indent(self):
+        t = self.text
+        line = t.get("insert linestart", "insert")
+        ws = line[: len(line) - len(line.lstrip(" \t"))]
+        unit = "\t" if (ws.endswith("\t") or (not ws and self.indent_unit == "\t")) else "    "
+        prev, nxt = line[-1:], t.get("insert", "insert+1c")
+        rest_empty = t.get("insert", "insert lineend").strip() == ""
+        if self.lang_rx and prev in "([{" and PAIRS.get(prev) == nxt:
+            # Enter giữa cặp {|} -> mở thành 3 dòng, con trỏ ở dòng giữa đã thụt lề
+            t.insert("insert", "\n" + ws + unit + "\n" + ws)
+            t.mark_set("insert", f"insert-{len(ws) + 1}c")
+        elif self.lang_rx and rest_empty and (prev in "([{" or (prev == ":" and self.lang_key == "python")):
+            t.insert("insert", "\n" + ws + unit)
+        else:
+            t.insert("insert", "\n" + ws)
+        t.see("insert")
+
+    # ---------- tự đóng ngoặc / nháy (chỉ khi là file code) ----------
+    def _on_keypress(self, e):
+        if self.lang_rx is None or not e.char or e.char not in "([{)]}\"'`":
+            return
+        if e.state & 0xC:  # Ctrl / Alt
+            return
+        t, ch = self.text, e.char
+        pair = PAIRS.get(ch)
+        if t.tag_ranges("sel"):
+            if not pair:
+                return
+            a, b = t.index("sel.first"), t.index("sel.last")
+            inner = t.get(a, b)
+            t.replace(a, b, ch + inner + pair)  # bọc phần đang chọn
+            t.tag_remove("sel", "1.0", "end")
+            t.tag_add("sel", f"{a}+1c", f"{a}+{len(inner) + 1}c")
+            t.mark_set("insert", f"{a}+{len(inner) + 1}c")
+            return "break"
+        nxt = t.get("insert", "insert+1c")
+        if ch in CLOSERS and nxt == ch:  # gõ đè ký tự đóng đã có sẵn
+            t.mark_set("insert", "insert+1c")
+            t.see("insert")
+            return "break"
+        if not pair:
+            return
+        if nxt and not (nxt.isspace() or nxt in AFTER_OK):
+            return  # đang đứng trước chữ: không tự đóng
+        prev = t.get("insert-1c", "insert") if t.compare("insert", ">", "1.0") else ""
+        if ch in "\"'`":
+            if self.lang_key == "python" and ch != "`" and prev == ch and t.get("insert-2c", "insert") == ch * 2:
+                t.insert("insert", ch * 4)  # """|"""
+                t.mark_set("insert", "insert-3c")
+                return "break"
+            if prev == "\\":
+                return
+            if prev.isalnum() or prev == "_":
+                # chữ đứng trước (don't, it's...) -> không đóng; riêng Python cho f"..." b'...' r"..."
+                if not (self.lang_key == "python" and prev in "rRbBuUfF"
+                        and not (lambda c: c.isalnum() or c == "_")(t.get("insert-2c", "insert-1c"))):
+                    return
+        t.insert("insert", ch + pair)
+        t.mark_set("insert", "insert-1c")
+        t.see("insert")
+        return "break"
+
+    def _on_backspace(self, e):
+        t = self.text
+        if self.lang_rx is None or t.tag_ranges("sel") or t.compare("insert", "==", "1.0"):
+            return
+        prev, nxt = t.get("insert-1c", "insert"), t.get("insert", "insert+1c")
+        if prev in PAIRS and PAIRS[prev] == nxt:  # xóa cả cặp rỗng ()
+            t.delete("insert-1c", "insert+1c")
+            return "break"
+
+    def duplicate_line(self):
+        line = self.text.get("insert linestart", "insert lineend")
+        self.text.insert("insert lineend", "\n" + line)
+
+    def del_word_left(self):
+        if self.text.compare("insert", ">", "1.0"):
+            self.text.delete("insert -1c wordstart", "insert")
+
+    def del_word_right(self):
+        self.text.delete("insert", "insert wordend")
+
+    def goto_line(self):
+        total = int(self.text.index("end-1c").split(".")[0])
+        val = ask_text(self.root, "Đến dòng", f"Số dòng (1-{total}):")
+        if val and val.strip().isdigit():
+            n = max(1, min(total, int(val)))
+            self.text.mark_set("insert", f"{n}.0")
+            self.text.see("insert")
+            self.refresh()
+        self.text.focus_set()
+
+    def zoom(self, d):
+        size = 12 if d == 0 else max(6, min(48, self.font.cget("size") + d))
+        self.font.configure(size=size)
+        self._set_tabs()
+
+    def _set_tabs(self):
+        self.text.configure(tabs=(self.font.measure(" " * 4),))
+
+    # ---------- find / replace ----------
+    def open_find(self, replace):
+        self.find_bar.pack(side="bottom", fill="x", before=self.status)
+        if replace:
+            self.repl_frame.pack(side="left")
+        else:
+            self.repl_frame.pack_forget()
+        if self.text.tag_ranges("sel"):
+            self.find_var.set(self.text.get("sel.first", "sel.last").split("\n")[0])
+        self.find_entry.focus_set()
+        self.find_entry.select_range(0, "end")
+        self.highlight_matches()
+
+    def close_find(self):
+        self.find_bar.pack_forget()
+        self.text.tag_remove("match", "1.0", "end")
+        self.text.focus_set()
+
+    def highlight_matches(self):
+        self.text.tag_remove("match", "1.0", "end")
+        pat = self.find_var.get()
+        if not pat:
+            self.find_info.config(text="")
+            return
+        n, idx = 0, "1.0"
+        while n < 5000:
+            cnt = tk.IntVar()
+            idx = self.text.search(pat, idx, stopindex="end", nocase=True, count=cnt)
+            if not idx or cnt.get() == 0:
+                break
+            end = f"{idx}+{cnt.get()}c"
+            self.text.tag_add("match", idx, end)
+            idx, n = end, n + 1
+        self.find_info.config(text=f"{n} kết quả" if n else "Không thấy")
+
+    def find_next(self, backwards):
+        pat = self.find_var.get()
+        if not pat:
+            return
+        cnt = tk.IntVar()
+        if backwards:
+            start = self.text.index("sel.first") if self.text.tag_ranges("sel") else self.text.index("insert")
+            idx = self.text.search(pat, start, stopindex="1.0", backwards=True, nocase=True, count=cnt) \
+                or self.text.search(pat, "end", stopindex="1.0", backwards=True, nocase=True, count=cnt)
+        else:
+            start = self.text.index("sel.last") if self.text.tag_ranges("sel") else self.text.index("insert")
+            idx = self.text.search(pat, start, stopindex="end", nocase=True, count=cnt) \
+                or self.text.search(pat, "1.0", stopindex="end", nocase=True, count=cnt)
+        if not idx:
+            return
+        end = f"{idx}+{cnt.get()}c"
+        self.text.tag_remove("sel", "1.0", "end")
+        self.text.tag_add("sel", idx, end)
+        self.text.mark_set("insert", end if not backwards else idx)
+        self.text.see(idx)
+
+    def replace_one(self):
+        if self.text.tag_ranges("sel") and \
+                self.text.get("sel.first", "sel.last").lower() == self.find_var.get().lower():
+            self.text.replace("sel.first", "sel.last", self.repl_var.get())
+        self.find_next(False)
+        self.highlight_matches()
+        self.schedule_highlight()
+
+    def replace_all(self):
+        pat = self.find_var.get()
+        if not pat:
+            return
+        idx, n = "1.0", 0
+        self.text.edit_separator()
+        while True:
+            cnt = tk.IntVar()
+            idx = self.text.search(pat, idx, stopindex="end", nocase=True, count=cnt)
+            if not idx or cnt.get() == 0:
+                break
+            end = f"{idx}+{cnt.get()}c"
+            self.text.replace(idx, end, self.repl_var.get())
+            idx = f"{idx}+{len(self.repl_var.get())}c"
+            n += 1
+        self.text.edit_separator()
+        self.highlight_matches()
+        self.find_info.config(text=f"Đã thay {n}")
+        self.schedule_highlight()
+
+    # ---------- icon ----------
+    def _set_icon(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        for p in ("/usr/share/icons/hicolor/256x256/apps/ted.png", os.path.join(here, "ted.png")):
+            if os.path.isfile(p):
+                try:
+                    self._icon = tk.PhotoImage(file=p)
+                    self.root.iconphoto(True, self._icon)
+                except tk.TclError:
+                    pass
+                return
+
+    # ---------- nhớ vị trí con trỏ ----------
+    def _pos_file(self):
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+        return os.path.join(base, "ted", "positions.json")
+
+    def _load_positions(self):
+        try:
+            with open(self._pos_file(), "r", encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_pos(self):
+        if not self.path:
+            return
+        try:
+            d = self._load_positions()
+            d.pop(self.path, None)
+            d[self.path] = self.text.index("insert")
+            while len(d) > 200:
+                d.pop(next(iter(d)))
+            p = self._pos_file()
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+        except OSError:
+            pass
+
+    def _restore_pos(self):
+        if not (self.path and os.path.isfile(self.path)):
+            return
+        try:
+            line, col = (int(x) for x in str(self._load_positions().get(self.path, "")).split("."))
+        except ValueError:
+            return
+        total = int(self.text.index("end-1c").split(".")[0])
+        if line > total or (line, col) == (1, 0):
+            return
+        idx = f"{line}.{col}"
+        self.text.mark_set("insert", idx)
+        self.root.after(60, lambda: (self.text.see(idx), self.refresh()))
+
+    # ---------- thụt lề / comment / wrap ----------
+    def _detect_indent(self):
+        if self.lang_rx is None:
+            self.indent_unit = "\t"  # file thường: Tab là ký tự tab như nano
+            return
+        head = self.text.get("1.0", "400.0")
+        tabs = len(re.findall(r"^\t", head, re.M))
+        spaces = len(re.findall(r"^ {2,}", head, re.M))
+        if tabs == spaces == 0 and self.path and (self.path.endswith(".go") or os.path.basename(self.path) == "Makefile"):
+            tabs = 1
+        self.indent_unit = "\t" if tabs > spaces else "    "
+
+    def _sel_lines(self):
+        """(dòng đầu, dòng cuối, có phải khối nhiều dòng) của vùng chọn, hoặc dòng hiện tại."""
+        t = self.text
+        if t.tag_ranges("sel"):
+            a, b = t.index("sel.first"), t.index("sel.last")
+            first, last = int(a.split(".")[0]), int(b.split(".")[0])
+            adjusted = False
+            if b.endswith(".0") and last > first:  # vùng chọn kết thúc ở đầu dòng kế -> không tính dòng đó
+                last -= 1
+                adjusted = True
+            return first, last, (last > first or adjusted)
+        n = int(t.index("insert").split(".")[0])
+        return n, n, False
+
+    def _group(self, fn):
+        """Gộp các thay đổi thành 1 bước undo."""
+        t = self.text
+        t.edit_separator()
+        t.configure(autoseparators=False)
+        try:
+            fn()
+        finally:
+            t.configure(autoseparators=True)
+            t.edit_separator()
+
+    def _reselect(self, first, last):
+        t = self.text
+        t.tag_remove("sel", "1.0", "end")
+        t.tag_add("sel", f"{first}.0", f"{last}.end")
+        t.mark_set("insert", f"{last}.end")
+
+    def _on_tab(self, e):
+        t = self.text
+        if t.tag_ranges("sel"):
+            first, last, block = self._sel_lines()
+            if block:
+                def do():
+                    for n in range(first, last + 1):
+                        if t.get(f"{n}.0", f"{n}.end").strip():
+                            t.insert(f"{n}.0", self.indent_unit)
+                self._group(do)
+                self._reselect(first, last)
+                return "break"
+            t.delete("sel.first", "sel.last")  # chọn trong 1 dòng: Tab thay phần chọn
+        if self.indent_unit == "\t":
+            t.insert("insert", "\t")
+        else:
+            col = int(t.index("insert").split(".")[1])
+            t.insert("insert", " " * (4 - col % 4))
+        t.see("insert")
+        return "break"
+
+    def _on_shift_tab(self, e):
+        t = self.text
+        first, last, _ = self._sel_lines()
+
+        def do():
+            for n in range(first, last + 1):
+                line = t.get(f"{n}.0", f"{n}.end")
+                if line.startswith("\t"):
+                    t.delete(f"{n}.0", f"{n}.1")
+                else:
+                    k = min(4, len(line) - len(line.lstrip(" ")))
+                    if k:
+                        t.delete(f"{n}.0", f"{n}.{k}")
+        self._group(do)
+        if t.tag_ranges("sel"):
+            self._reselect(first, last)
+        return "break"
+
+    def toggle_comment(self):
+        spec = COMMENTS.get(self.lang_key)
+        if not spec:
+            return
+        op, cl = spec
+        mark, cmark = op.strip(), cl.strip()
+        t = self.text
+        first, last, _ = self._sel_lines()
+        had_sel = bool(t.tag_ranges("sel"))
+        cur_line, cur_col = (int(x) for x in t.index("insert").split("."))
+        lines = {n: t.get(f"{n}.0", f"{n}.end") for n in range(first, last + 1)}
+        nonempty = [n for n, l in lines.items() if l.strip()]
+        if not nonempty:
+            return
+
+        def commented(l):
+            s = l.strip()
+            return s.startswith(mark) and (not cmark or s.endswith(cmark))
+        uncomment = all(commented(lines[n]) for n in nonempty)
+        indent = min(len(lines[n]) - len(lines[n].lstrip()) for n in nonempty)
+        shift = {}  # độ dịch của con trỏ trên từng dòng
+
+        def do():
+            for n in nonempty:
+                l = lines[n]
+                if uncomment:
+                    lead = len(l) - len(l.lstrip())
+                    body = l[lead + len(mark):]
+                    pre = len(mark)
+                    if body.startswith(" "):
+                        body = body[1:]
+                        pre += 1
+                    shift[n] = -min(pre, max(0, cur_col - lead))
+                    if cmark:
+                        b2 = body.rstrip()
+                        if b2.endswith(cmark):
+                            body = b2[: -len(cmark)].rstrip()
+                    new = l[:lead] + body
+                else:
+                    new = l[:indent] + op + l[indent:] + cl
+                    shift[n] = len(op) if cur_col >= indent else 0
+                t.delete(f"{n}.0", f"{n}.end")
+                t.insert(f"{n}.0", new)
+        self._group(do)
+        if had_sel:
+            self._reselect(first, last)
+        else:
+            t.mark_set("insert", f"{cur_line}.{max(0, cur_col + shift.get(cur_line, 0))}")
+        self.schedule_highlight()
+
+    def toggle_wrap(self):
+        self.wrap_on = not self.wrap_on
+        self.text.configure(wrap="word" if self.wrap_on else "none")
+        if self.wrap_on:
+            self.xs.pack_forget()
+        else:
+            self.xs.pack(side="bottom", fill="x", before=self.text)
+        self.refresh()
+
+    # ---------- syntax highlight ----------
+    def set_language(self):
+        name = detect_lang(self.path, self.text.get("1.0", "1.end"))
+        for tag in SYN_COLORS:
+            self.text.tag_remove(tag, "1.0", "end")
+        self.lang_name = LANG_LABEL.get(name, "") if name else ""
+        self.lang_rx = get_lang_rx(name) if name else None
+        self.lang_key = name
+        self._hl_range = (0, -1)
+        if self.lang_rx:
+            self.schedule_highlight(20)
+        self._detect_indent()
+
+    def schedule_highlight(self, delay=150):
+        if self.lang_rx is None:
+            return
+        if self._hl_job is not None:
+            self.root.after_cancel(self._hl_job)
+        self._hl_job = self.root.after(delay, self.highlight)
+
+    def _on_key_release(self, e):
+        if e.keysym not in NAV_KEYS:
+            self.schedule_highlight()
+
+    def _on_yscroll(self, first, last):
+        self.ys.set(first, last)
+        self._maybe_rehighlight()
+
+    def _visible_lines(self):
+        t = self.text
+        first = int(t.index("@0,0").split(".")[0])
+        last = int(t.index(f"@0,{max(t.winfo_height(), 1)}").split(".")[0])
+        return first, last
+
+    def _maybe_rehighlight(self):
+        if self.lang_rx is None or self._hl_job is not None:
+            return
+        first, last = self._visible_lines()
+        total = int(self.text.index("end-1c").split(".")[0])
+        a, b = self._hl_range
+        if (first - 30 < a and a > 1) or (last + 30 > b and b < total):
+            self._hl_job = self.root.after(30, self.highlight)
+
+    def highlight(self):
+        self._hl_job = None
+        rx = self.lang_rx
+        if rx is None:
+            return
+        t = self.text
+        total = int(t.index("end-1c").split(".")[0])
+        first, last = self._visible_lines()
+        a, b = max(1, first - PAD_LINES), min(total, last + PAD_LINES)
+        s_line, e_line = (1, total) if total <= FULL_SCAN_LINES else (a, b)
+        text = t.get(f"{s_line}.0", f"{e_line}.end")
+
+        starts, i = [0], text.find("\n")
+        while i != -1:
+            starts.append(i + 1)
+            i = text.find("\n", i + 1)
+
+        lo, hi = a - s_line, b - s_line  # phạm vi dòng (tương đối) cần tô
+        ranges = {}
+        for tag, s, e in tokenize(rx, text):
+            ls = bisect_right(starts, s) - 1
+            if ls > hi:
+                break
+            le = bisect_right(starts, e - 1) - 1
+            if le < lo:
+                continue
+            ranges.setdefault(tag, []).extend(
+                (f"{s_line + ls}.{s - starts[ls]}", f"{s_line + le}.{e - starts[le]}"))
+        for tag in SYN_COLORS:
+            t.tag_remove(tag, f"{a}.0", f"{b}.end")
+        for tag, idx in ranges.items():
+            t.tag_add(tag, *idx)
+        self._hl_range = (a, b)
+
+    # ---------- ui ----------
+    def refresh(self):
+        line, col = self.text.index("insert").split(".")
+        name = os.path.basename(self.path) if self.path else "Chưa đặt tên"
+        mod = self.text.edit_modified()
+        self.root.title(f"{'● ' if mod else ''}{name} — ted")
+        self.status.config(text=f"{name}{' [đã sửa]' if mod else ''}    Dòng {line}, Cột {int(col) + 1}    UTF-8{'    ' + self.lang_name if self.lang_name else ''}{'    Wrap' if self.wrap_on else ''}")
+
+    def run(self):
+        self.root.mainloop()
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if args and args[0] in ("-h", "--help"):
+        print("Dùng: ted [tên file]\n"
+              "  Ctrl+S lưu · Ctrl+O mở · Ctrl+F tìm · Ctrl+H thay · Ctrl+G đến dòng\n"
+              "  Ctrl+/ comment · Tab/Shift+Tab thụt lề · Alt+Z xuống dòng · Ctrl+Q thoát")
+        sys.exit(0)
+    if args and args[0] in ("-v", "--version"):
+        print(f"ted {VERSION}")
+        sys.exit(0)
+    Editor(args[0] if args else None).run()
