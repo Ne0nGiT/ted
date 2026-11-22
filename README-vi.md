@@ -46,6 +46,7 @@ Cách dùng: `ted <tên file>`. Nếu file chưa tồn tại, chương trình m�
 | Tab / Shift+Tab | Thụt lề / lùi lề (áp dụng cho cả khối nếu chọn nhiều dòng) |
 | Alt+Z | Bật/tắt tự động xuống dòng |
 | Ctrl+= / Ctrl+- / Ctrl+0 hoặc Ctrl+cuộn chuột | Phóng to / thu nhỏ / đặt lại cỡ chữ |
+| Ctrl+L | Bật tắt số dòng |
 
 ## Tính năng
 

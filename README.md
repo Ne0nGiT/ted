@@ -45,6 +45,7 @@ Usage: `ted <filename>`. If the file doesn't exist, it opens as a blank document
 | Tab / Shift+Tab | Indent / outdent (the whole block when multiple lines are selected) |
 | Alt+Z | Toggle word wrap |
 | Ctrl+= / Ctrl+- / Ctrl+0 or Ctrl+mouse wheel | Zoom in / out / reset |
+| Ctrl+L | Toggle line numbers |
 
 ## Features
 
