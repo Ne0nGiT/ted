@@ -1,4 +1,5 @@
 # ted
+For **Vietnamese** version, check [README-vi.md](README-vi.md)
 
 A **lightweight** GUI text editor for Linux, opened with `ted <filename>`, with modern shortcuts (Ctrl+S, Ctrl+Z, Ctrl+F...) instead of a nano-style interface.
 
@@ -17,10 +18,13 @@ cd ted
 sudo install -m 755 ted /usr/local/bin/ted
 cd ..
 ```
-
-Try it without installing: `python3 ted notes.txt`
+If you want to try it without install it on PATH, install only the ted file and run:
+`python3 ted notes.txt`
 
 Usage: `ted <filename>`. If the file doesn't exist, it opens as a blank document and is created when you save (Ctrl+S).
+
+<img width="906" height="627" alt="image" src="https://github.com/user-attachments/assets/7b248ac1-396b-4068-9f25-db0ade90373d" />
+
 
 ## Keyboard shortcuts
 
@@ -45,6 +49,8 @@ Usage: `ted <filename>`. If the file doesn't exist, it opens as a blank document
 ## Features
 
 - **Syntax highlighting:** Python, JavaScript/TypeScript, JSON, HTML/XML, CSS, Markdown, Shell, C-family languages (C/C++/Java/Go/Rust/C#/PHP...), and config files (yaml/toml/ini). Detected by file extension or `#!` line.
+<img width="906" height="627" alt="image" src="https://github.com/user-attachments/assets/5cbf92fc-4957-4cff-b8af-7533418b2d45" />
+
 - **For code files:** automatically closes brackets and quotes, wraps selected text, expands Enter inside `{}` into three lines, and auto-indents.
 - Always adds a trailing newline when saving (like nano), so `cat` and `git diff` won't report a missing newline.
 - Remembers the cursor position from the previous session (stored in `~/.cache/ted/positions.json`).
