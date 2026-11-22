@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """ted - text editor GUI nhẹ, keybind hiện đại.  Dùng: ted <tên file>"""
+import codecs
 import json
 import os
+import queue
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from bisect import bisect_right
 from tkinter import filedialog, ttk
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 BG, FG, SEL = "#1e1e1e", "#d4d4d4", "#264f78"
 BAR_BG, BAR_FG = "#252526", "#9d9d9d"
@@ -19,6 +26,7 @@ FIELD_BG, BTN_BG, BTN_HOVER = "#3c3c3c", "#3c3c3c", "#505050"
 ACCENT = "#0e639c"
 MATCH_BG = "#614d00"
 GUTTER_FG, GUTTER_CUR = "#858585", "#c6c6c6"  # màu số dòng thường / dòng hiện tại
+OCC_BG = "#3d4046"  # nền các chữ trùng với chữ đang đặt con trỏ
 
 
 # ------------------------------------------------------------ syntax highlight
@@ -32,6 +40,7 @@ PAD_LINES = 120          # tô thêm quanh vùng đang nhìn thấy
 FULL_SCAN_LINES = 4000   # file ngắn hơn: quét cả file để đúng chuỗi/comment nhiều dòng
 NAV_KEYS = {"Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next", "Escape",
             "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Caps_Lock"}
+MOD_KEYS = {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Caps_Lock"}
 
 _DQ = r'"(?:\\.|[^"\\\n])*"'
 _SQ = r"'(?:\\.|[^'\\\n])*'"
@@ -178,6 +187,68 @@ COMMENTS = {  # ký hiệu comment theo ngôn ngữ: (mở, đóng)
 AFTER_OK = ")]}\"'`,;:.>"  # ký tự đứng sau con trỏ mà vẫn cho phép tự đóng cặp
 
 
+# ------------------------------------------------------------------ code runner
+# >>> RUNNER-BEGIN
+RUN_CMDS = {  # đuôi file -> lệnh chạy ({file} = file đang mở, {out} = file tạm khi phải biên dịch)
+    "py": ["python3", "-u", "{file}"], "pyw": ["python3", "-u", "{file}"],
+    "js": ["node", "{file}"], "mjs": ["node", "{file}"], "cjs": ["node", "{file}"],
+    "sh": ["bash", "{file}"], "bash": ["bash", "{file}"], "zsh": ["zsh", "{file}"],
+    "php": ["php", "{file}"], "rb": ["ruby", "{file}"], "pl": ["perl", "{file}"], "lua": ["lua", "{file}"],
+    "go": ["go", "run", "{file}"], "java": ["java", "{file}"],
+    "c": ["sh", "-c", 'gcc "$1" -o "$2" && "$2"', "sh", "{file}", "{out}"],
+    "cpp": ["sh", "-c", 'g++ -std=c++17 "$1" -o "$2" && "$2"', "sh", "{file}", "{out}"],
+    "cc": ["sh", "-c", 'g++ -std=c++17 "$1" -o "$2" && "$2"', "sh", "{file}", "{out}"],
+    "rs": ["sh", "-c", 'rustc "$1" -o "$2" && "$2"', "sh", "{file}", "{out}"],
+    "html": ["xdg-open", "{file}"], "htm": ["xdg-open", "{file}"],
+}
+RUN_NEEDS = {"c": "gcc", "cpp": "g++", "cc": "g++", "rs": "rustc"}  # chương trình phải có sẵn
+INSTALL_HINT = {"python3": "python3", "node": "nodejs", "php": "php-cli", "ruby": "ruby", "perl": "perl",
+                "lua": "lua5.4", "go": "golang-go", "java": "default-jdk", "gcc": "gcc", "g++": "g++",
+                "rustc": "rustc", "zsh": "zsh", "xdg-open": "xdg-utils"}
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def clean_output(s):
+    """Bỏ mã màu ANSI, đổi \r thành xuống dòng."""
+    return _ANSI.sub("", s).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def build_run_cmd(path, first_line="", out="/tmp/ted-run"):
+    """Trả về (lệnh, chương trình cần có), hoặc (None, lý do) nếu không biết cách chạy file này."""
+    base = os.path.basename(path)
+    ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
+    tpl = RUN_CMDS.get(ext)
+    if tpl is None and first_line.startswith("#!"):  # file không đuôi: theo dòng #! đầu file
+        try:
+            parts = shlex.split(first_line[2:].strip())
+        except ValueError:
+            parts = []
+        if parts:
+            tpl = parts + ["{file}"]
+    if tpl is None:
+        what = f".{ext}" if ext else "không có đuôi"
+        return None, f"Chưa biết cách chạy file ({what}).\nHỗ trợ: " + ", ".join(sorted(RUN_CMDS))
+    cmd = [a.replace("{file}", path).replace("{out}", out) for a in tpl]
+    return cmd, RUN_NEEDS.get(ext) or cmd[0]
+
+
+def read_process(proc, q):
+    """Chạy trong luồng riêng: đọc output (không đợi xuống dòng, để thấy cả dấu nhắc input) rồi đẩy vào hàng đợi."""
+    dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    try:
+        while True:
+            data = os.read(proc.stdout.fileno(), 4096)
+            if not data:
+                break
+            q.put(("out", dec.decode(data)))
+    except OSError:
+        pass
+    tail = dec.decode(b"", final=True)
+    if tail:
+        q.put(("out", tail))
+    q.put(("end", proc.wait()))
+# <<< RUNNER-END
+
 # ---------------------------------------------------------------- dialog tối
 class Dialog(tk.Toplevel):
     """Hộp thoại tự vẽ theo theme tối. buttons = [(nhãn, giá trị)], nút đầu là mặc định."""
@@ -289,6 +360,15 @@ class Editor:
         self.wrap_on = False
         self.show_lines = True
         self._gutter_job = None
+        self.occ_on = True
+        self._occ_job = None
+        self.proc = None
+        self._run_q = None
+        self._run_gen = 0
+        self._run_start = 0.0
+        self._run_killed = False
+        self._run_out_bin = ""
+        self.run_visible = False
         self.lang_key = None
         self.lang_name = ""
         self._hl_job = None
@@ -320,6 +400,7 @@ class Editor:
             self.gutter.bind(ev, self._gutter_wheel)
         for tag, color in SYN_COLORS.items():
             self.text.tag_configure(tag, foreground=color)
+        self.text.tag_configure("occ", background=OCC_BG)
         self.text.tag_configure("match", background=MATCH_BG)
         self.text.tag_raise("sel")
         self._set_tabs()
@@ -343,6 +424,43 @@ class Editor:
         # --- status bar ---
         self.status = tk.Label(self.root, anchor="w", bg=BAR_BG, fg=BAR_FG, padx=8)
         self.status.pack(side="bottom", fill="x")
+
+        # --- khung Output của code runner (ẩn mặc định, F5 để chạy) ---
+        self.out_font = tkfont.nametofont("TkFixedFont").copy()
+        self.out_font.configure(size=11)
+        self.run_panel = tk.Frame(self.root, bg=BAR_BG)
+        head = tk.Frame(self.run_panel, bg=BAR_BG)
+        head.pack(fill="x")
+        tk.Label(head, text="Output", bg=BAR_BG, fg=FG).pack(side="left", padx=(8, 8))
+        self.run_status = tk.Label(head, text="", bg=BAR_BG, fg=BAR_FG)
+        self.run_status.pack(side="left")
+        self._button(head, "✕", lambda: self.show_output(False)).pack(side="right", padx=(2, 6), pady=3)
+        self._button(head, "Xóa", self._out_clear).pack(side="right", padx=2)
+        self._button(head, "Dừng", self.stop_run).pack(side="right", padx=2)
+        self._button(head, "Chạy", self.run_file).pack(side="right", padx=2)
+        mid = tk.Frame(self.run_panel, bg=BG)
+        mid.pack(fill="both", expand=True)
+        self.out = tk.Text(mid, height=10, wrap="word", state="disabled", bg=BG, fg=FG, font=self.out_font,
+                           relief="flat", bd=0, highlightthickness=0, padx=8, pady=4,
+                           selectbackground=SEL, cursor="arrow")
+        osb = ttk.Scrollbar(mid, orient="vertical", command=self.out.yview)
+        self.out.configure(yscrollcommand=osb.set)
+        osb.pack(side="right", fill="y")
+        self.out.pack(side="left", fill="both", expand=True)
+        self.out.tag_configure("info", foreground="#858585")
+        self.out.tag_configure("ok", foreground="#89d185")
+        self.out.tag_configure("err", foreground="#f48771")
+        self.out.tag_configure("inp", foreground="#9cdcfe")
+        self.out.bind("<Button-1>", lambda e: self.out.focus_set())  # để bôi đen và Ctrl+C được
+        inrow = tk.Frame(self.run_panel, bg=BAR_BG)
+        inrow.pack(fill="x")
+        tk.Label(inrow, text="stdin ›", bg=BAR_BG, fg=BAR_FG).pack(side="left", padx=(8, 4))
+        self.stdin_var = tk.StringVar()
+        self.stdin_entry = self._entry(inrow, self.stdin_var)
+        self.stdin_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=4, ipady=2)
+        self.stdin_entry.bind("<Return>", self._send_stdin)
+        self.stdin_entry.bind("<Control-d>", self._close_stdin)  # Ctrl+D = hết dữ liệu (EOF)
+        self.stdin_entry.bind("<Escape>", lambda e: (self.text.focus_set(), "break")[1])
 
         self._bind_keys()
         self.load()
@@ -460,6 +578,7 @@ class Editor:
     def quit(self, _e=None):
         if self.confirm_discard():
             self._save_pos()
+            self.stop_run(quiet=True, force=True)
             self.root.destroy()
         return "break"
 
@@ -512,6 +631,11 @@ class Editor:
         b(["<Control-slash>"], self.toggle_comment)
         b(["<Alt-z>", "<Alt-Z>"], self.toggle_wrap)
         b(["<Control-l>", "<Control-L>"], self.toggle_lines)
+        b(["<Alt-h>", "<Alt-H>"], self.toggle_occ)
+        self.root.bind("<F5>", self.run_file)
+        self.root.bind("<Shift-F5>", lambda e: (self.stop_run(), "break")[1])
+        self.root.bind("<Control-j>", lambda e: (self.show_output(not self.run_visible), "break")[1])
+        self.text.bind("<ButtonRelease-1>", lambda e: self.schedule_occ(), add="+")
         self.text.bind("<BackSpace>", self._on_backspace)
         self.text.bind("<KeyRelease>", self._on_key_release, add="+")
         self.text.bind("<ButtonRelease-2>", lambda e: self.schedule_highlight(), add="+")
@@ -533,19 +657,46 @@ class Editor:
         except tk.TclError:
             pass
 
+    def _code_part(self, line):
+        """Phần code của dòng, bỏ comment ở cuối (không cắt nhầm # hoặc // nằm trong chuỗi)."""
+        marker = {"python": "#", "shell": "#", "conf": "#", "js": "//", "c": "//"}.get(self.lang_key)
+        if not marker:
+            return line
+        quote, i = None, 0
+        while i < len(line):
+            ch = line[i]
+            if quote:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'`":
+                quote = ch
+            elif line.startswith(marker, i):
+                return line[:i]
+            i += 1
+        return line
+
     def auto_indent(self):
         t = self.text
         line = t.get("insert linestart", "insert")
         ws = line[: len(line) - len(line.lstrip(" \t"))]
         unit = "\t" if (ws.endswith("\t") or (not ws and self.indent_unit == "\t")) else "    "
-        prev, nxt = line[-1:], t.get("insert", "insert+1c")
+        nxt = t.get("insert", "insert+1c")
         rest_empty = t.get("insert", "insert lineend").strip() == ""
-        if self.lang_rx and prev in "([{" and PAIRS.get(prev) == nxt:
+        opener = self._code_part(line).rstrip()[-1:]  # ký tự cuối của phần code (bỏ comment)
+        if line.strip() == "" and rest_empty:
+            # Enter trên dòng chỉ có khoảng trắng: dòng đó trở thành dòng trống thật (không để lại
+            # tab/dấu cách thừa), dòng mới vẫn giữ mức thụt lề để gõ tiếp
+            t.delete("insert linestart", "insert lineend")
+            t.insert("insert", "\n" + ws)
+        elif self.lang_rx and line[-1:] in ("(", "[", "{") and PAIRS.get(line[-1:]) == nxt:
             # Enter giữa cặp {|} -> mở thành 3 dòng, con trỏ ở dòng giữa đã thụt lề
             t.insert("insert", "\n" + ws + unit + "\n" + ws)
             t.mark_set("insert", f"insert-{len(ws) + 1}c")
-        elif self.lang_rx and rest_empty and (prev in "([{" or (prev == ":" and self.lang_key == "python")):
-            t.insert("insert", "\n" + ws + unit)
+        elif self.lang_rx and rest_empty and (opener in ("(", "[", "{") or (opener == ":" and self.lang_key == "python")):
+            t.insert("insert", "\n" + ws + unit)  # sau dòng mở khối: thụt thêm 1 cấp
         else:
             t.insert("insert", "\n" + ws)
         t.see("insert")
@@ -717,6 +868,221 @@ class Editor:
         self.highlight_matches()
         self.find_info.config(text=f"Đã thay {n}")
         self.schedule_highlight()
+
+    # ---------- code runner (F5) ----------
+    def show_output(self, show=True):
+        if show and not self.run_visible:
+            self.run_panel.pack(side="bottom", fill="x", after=self.status)
+            self.run_visible = True
+        elif not show and self.run_visible:
+            self.run_panel.pack_forget()
+            self.run_visible = False
+            self.text.focus_set()
+
+    def _out_append(self, s, tag=None):
+        o = self.out
+        o.configure(state="normal")
+        o.insert("end", s, tag or ())
+        lines = int(o.index("end-1c").split(".")[0])
+        if lines > 5000:  # chống tràn bộ nhớ khi chương trình in vô tận
+            o.delete("1.0", f"{lines - 4000}.0")
+        o.configure(state="disabled")
+        o.see("end")
+
+    def _out_clear(self):
+        self.out.configure(state="normal")
+        self.out.delete("1.0", "end")
+        self.out.configure(state="disabled")
+
+    def _set_run_status(self, text, color=BAR_FG):
+        self.run_status.config(text=text, fg=color)
+
+    def run_file(self, _e=None):
+        if not self.path:
+            self.save_as()
+            if not self.path:
+                return "break"
+        elif self.text.edit_modified():
+            self.save()  # lưu trước khi chạy để không chạy bản cũ
+            if self.text.edit_modified():
+                return "break"
+        self.stop_run(quiet=True)
+        self.show_output(True)
+        self._out_clear()
+        out_bin = os.path.join(tempfile.gettempdir(), f"ted-run-{os.getpid()}")
+        cmd, need = build_run_cmd(self.path, self.text.get("1.0", "1.end"), out_bin)
+        if cmd is None:
+            self._out_append(need + "\n", "err")
+            self._set_run_status("không chạy được", "#f48771")
+            return "break"
+        if not shutil.which(need):
+            hint = INSTALL_HINT.get(need)
+            self._out_append(f"Không tìm thấy '{need}'." + (f"\nCài bằng: sudo apt install {hint}" if hint else "") + "\n", "err")
+            self._set_run_status("thiếu chương trình", "#f48771")
+            return "break"
+        label = f"{need} {os.path.basename(self.path)}" if cmd[0] == "sh" else " ".join(shlex.quote(a) for a in cmd)
+        self._out_append(f"$ {label}\n", "info")
+        try:
+            self.proc = subprocess.Popen(
+                cmd, cwd=os.path.dirname(self.path) or None, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+                start_new_session=True, env=dict(os.environ, PYTHONUNBUFFERED="1"))
+        except OSError as e:
+            self._out_append(f"Không chạy được: {e}\n", "err")
+            self._set_run_status("lỗi", "#f48771")
+            return "break"
+        self._run_out_bin = out_bin
+        self._run_killed = False
+        self._run_start = time.time()
+        self._run_gen += 1
+        self._run_q = queue.Queue(maxsize=2000)
+        threading.Thread(target=read_process, args=(self.proc, self._run_q), daemon=True).start()
+        self._set_run_status("đang chạy…", "#dcdcaa")
+        self._poll_run(self._run_gen)
+        return "break"
+
+    def _poll_run(self, gen):
+        if gen != self._run_gen:  # lần chạy cũ đã bị thay thế
+            return
+        ended = None
+        for _ in range(200):
+            try:
+                kind, val = self._run_q.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "out":
+                self._out_append(clean_output(val))
+            else:
+                ended = val
+                break
+        if ended is not None:
+            self._finish_run(ended)
+        else:
+            self.root.after(30, self._poll_run, gen)
+
+    def _finish_run(self, code):
+        dt = time.time() - self._run_start
+        if self._run_killed:
+            msg, tag, color, st = f"\n[đã dừng · {dt:.2f}s]\n", "info", BAR_FG, "đã dừng"
+        elif code == 0:
+            msg, tag, color, st = f"\n[xong · mã thoát 0 · {dt:.2f}s]\n", "ok", "#89d185", "xong"
+        else:
+            msg, tag, color, st = f"\n[lỗi · mã thoát {code} · {dt:.2f}s]\n", "err", "#f48771", f"lỗi ({code})"
+        self._out_append(msg, tag)
+        self._set_run_status(f"{st} · {dt:.2f}s", color)
+        p, self.proc = self.proc, None
+        for f in (getattr(p, "stdin", None), getattr(p, "stdout", None)):
+            try:
+                f.close()
+            except (OSError, AttributeError):
+                pass
+        try:
+            os.remove(self._run_out_bin)  # file tạm khi biên dịch C/C++/Rust
+        except OSError:
+            pass
+
+    def stop_run(self, quiet=False, force=False):
+        p = self.proc
+        if p is None or p.poll() is not None:
+            return
+        self._run_killed = True
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL if force else signal.SIGTERM)
+        except OSError:
+            pass
+        if not force:
+            self.root.after(1500, self._kill9, p)  # nếu 1,5 giây sau vẫn chưa chết thì buộc dừng
+        if quiet:  # bỏ qua kết quả của lần chạy cũ
+            self._run_gen += 1
+            self.proc = None
+
+    def _kill9(self, p):
+        if p.poll() is None:
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except OSError:
+                pass
+
+    def _send_stdin(self, _e=None):
+        text = self.stdin_var.get()
+        self.stdin_var.set("")
+        p = self.proc
+        if p is None or p.poll() is not None:
+            return "break"
+        try:
+            p.stdin.write((text + "\n").encode("utf-8"))
+            p.stdin.flush()
+        except (OSError, ValueError):
+            pass
+        self._out_append(text + "\n", "inp")  # chương trình không tự in lại phần mình gõ
+        return "break"
+
+    def _close_stdin(self, _e=None):
+        p = self.proc
+        if p is not None and p.stdin:
+            try:
+                p.stdin.close()
+            except OSError:
+                pass
+        return "break"
+
+    # ---------- tô các chữ trùng với chữ đang chọn / đang đặt con trỏ ----------
+    def toggle_occ(self):
+        self.occ_on = not self.occ_on
+        if self.occ_on:
+            self.schedule_occ(20)
+        else:
+            self.text.tag_remove("occ", "1.0", "end")
+
+    def schedule_occ(self, delay=200):
+        if self.lang_rx is None or not self.occ_on:
+            return
+        if self._occ_job is not None:
+            self.root.after_cancel(self._occ_job)
+        self._occ_job = self.root.after(delay, self.highlight_occurrences)
+
+    def _occ_target(self):
+        """(chuỗi cần tô, khớp nguyên từ?) hoặc None."""
+        t = self.text
+        if t.tag_ranges("sel"):
+            a, b = t.index("sel.first"), t.index("sel.last")
+            if a.split(".")[0] != b.split(".")[0]:
+                return None  # vùng chọn nhiều dòng: bỏ qua
+            sel = t.get(a, b)
+            if not sel or len(sel) > 80 or sel != sel.strip():
+                return None
+            return sel, bool(re.fullmatch(r"\w+", sel))
+        line_no, col = (int(x) for x in t.index("insert").split("."))
+        line = t.get(f"{line_no}.0", f"{line_no}.end")
+        for m in re.finditer(r"\w+", line):
+            if m.start() <= col <= m.end():
+                return m.group(), True
+        return None
+
+    def highlight_occurrences(self):
+        self._occ_job = None
+        t = self.text
+        t.tag_remove("occ", "1.0", "end")
+        if self.lang_rx is None or not self.occ_on:
+            return
+        target = self._occ_target()
+        if not target:
+            return
+        word, whole = target
+        total = int(t.index("end-1c").split(".")[0])
+        first, last = self._visible_lines()
+        a, b = max(1, first - PAD_LINES), min(total, last + PAD_LINES)
+        pat = "\\m" + word + "\\M" if whole else word  # \m \M = đầu/cuối từ (regex của Tk)
+        spans, idx, stop, cnt = [], f"{a}.0", f"{b}.end", tk.IntVar()
+        while len(spans) < 3000:
+            idx = t.search(pat, idx, stopindex=stop, regexp=whole, count=cnt)
+            if not idx or cnt.get() == 0:
+                break
+            end = f"{idx}+{cnt.get()}c"
+            spans.extend((idx, end))
+            idx = end
+        if len(spans) >= 4:  # ít nhất 2 chỗ mới đáng tô
+            t.tag_add("occ", *spans)
 
     # ---------- số dòng (gutter) ----------
     def toggle_lines(self):
@@ -974,6 +1340,8 @@ class Editor:
         self.lang_rx = get_lang_rx(name) if name else None
         self.lang_key = name
         self._hl_range = (0, -1)
+        self.text.tag_remove("occ", "1.0", "end")
+        self.schedule_occ(30)
         if self.lang_rx:
             self.schedule_highlight(20)
         self._detect_indent()
@@ -988,10 +1356,13 @@ class Editor:
     def _on_key_release(self, e):
         if e.keysym not in NAV_KEYS:
             self.schedule_highlight()
+        if e.keysym not in MOD_KEYS:
+            self.schedule_occ()
 
     def _on_yscroll(self, first, last):
         self.ys.set(first, last)
         self._schedule_gutter()
+        self.schedule_occ(150)
         self._maybe_rehighlight()
 
     def _visible_lines(self):
@@ -1056,14 +1427,48 @@ class Editor:
         self.root.mainloop()
 
 
+def detach():
+    """Tách khỏi terminal (như gedit, code): terminal gõ lệnh tiếp được ngay và đóng terminal không làm tắt ted.
+    Phải gọi TRƯỚC khi tạo cửa sổ Tk. Output và lỗi của ted được ghi vào ~/.cache/ted/ted.log."""
+    if not hasattr(os, "fork"):
+        return
+    try:
+        if os.fork() > 0:
+            os._exit(0)  # tiến trình cha thoát ngay -> terminal được trả lại
+        os.setsid()      # thoát khỏi phiên của terminal (không nhận SIGHUP khi đóng terminal)
+        if os.fork() > 0:
+            os._exit(0)
+    except OSError:
+        return           # không fork được thì cứ chạy như bình thường
+    devnull = os.open(os.devnull, os.O_RDWR)
+    try:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+        os.makedirs(os.path.join(base, "ted"), exist_ok=True)
+        log = os.open(os.path.join(base, "ted", "ted.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    except OSError:
+        log = devnull
+    os.dup2(devnull, 0)
+    os.dup2(log, 1)
+    os.dup2(log, 2)
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
+    foreground = False
+    for flag in ("-f", "--foreground"):
+        if flag in args:
+            args.remove(flag)
+            foreground = True
     if args and args[0] in ("-h", "--help"):
-        print("Dùng: ted [tên file]\n"
+        print("Dùng: ted [-f] [tên file]   (-f: giữ terminal chờ, để xem lỗi; mặc định ted tự tách khỏi terminal)\n"
               "  Ctrl+S lưu · Ctrl+O mở · Ctrl+F tìm · Ctrl+H thay · Ctrl+G đến dòng\n"
-              "  Ctrl+/ comment · Tab/Shift+Tab thụt lề · Alt+Z xuống dòng · Ctrl+L số dòng · Ctrl+Q thoát")
+              "  Ctrl+/ comment · Tab/Shift+Tab thụt lề · Alt+Z xuống dòng · Ctrl+L số dòng · Alt+H tô chữ trùng · F5 chạy file · Ctrl+J khung Output · Ctrl+Q thoát")
         sys.exit(0)
     if args and args[0] in ("-v", "--version"):
         print(f"ted {VERSION}")
         sys.exit(0)
+    if not os.environ.get("DISPLAY"):
+        sys.exit("ted: không thấy màn hình đồ họa (biến DISPLAY trống). Hãy chạy trong phiên desktop.")
+    if not foreground and (sys.stdin.isatty() or sys.stdout.isatty()):  # chạy từ terminal -> tách ra
+        detach()
     Editor(args[0] if args else None).run()
